@@ -5,6 +5,29 @@ const { encrypt, decrypt } = require('../utils/encryptor'); // decrypt for featu
 const { ERRORS, PLAN_LIMITS, INVITE_STATUS, NODE_MAILER_CONFIG } = require('../utils/constants');
 const bcrypt = require('bcryptjs');
 const User = require("../schema/User");
+const passwordValidator = require('password-validator');
+
+var schema = new passwordValidator();
+schema
+  .is().min(8)                                    // Minimum length 8
+  .is().max(100)                                  // Maximum length 100
+  .has().uppercase()                              // Must have uppercase letters
+  .has().lowercase()                              // Must have lowercase letters
+  .has().digits(1)                                // Must have at least 2 digits
+  .has().symbols(1)
+  .has().letters()
+  .has().not().spaces()                           // Should not have spaces
+  .is().not().oneOf(['Passw0rd', 'Password123']); // Blacklist these values
+
+
+  const checkIfStrongPassword = (password) => {
+    return new Promise((resolve, reject) => {
+      if (schema.validate(password))
+        resolve(true);
+      else
+        reject(new Error('Password Is Not Strong'))
+    })
+  }
 
 
 const createUser = async (req) => {
@@ -375,220 +398,41 @@ const createUser = async (req) => {
     }
   });
 
-  router.post('/signup',
-  body('full_name').exists().notEmpty(),
-  body('username').exists().notEmpty(),
-  body('email').exists().notEmpty(),
-  body('password').exists().notEmpty(),
-  body('referral').optional(),
-  async (req, res, next) => {
+  router.post('/signup', async (req, res, next) => {
     try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty())
-        return res.json({ status: false, message: "Missing Params" });
+      const { username, full_name, password, email } = req.body;
+      console.log(req.body,"req.body")
 
-      let {
+      // Check if any required field is missing
+      if (!username || !full_name || !password || !email) {
+        return res.status(400).json({ status: false, message: 'Missing required fields' });
+      }
+  console.log(req.body,"req.body1")
+      // Hash the password
+      const saltRounds = 10;
+      const hashPassword = await bcrypt.hash(password, saltRounds);
+  
+      // Create new user
+      const newUser = await User.create({
         username,
         full_name,
-        password,
+        password: hashPassword,
         email,
-        referral
-      } = req.body;
-
-      let ifUserExist = await User.findOne({
-        "$or": [{
-          "email": email
-        }, {
-          "username": username
-        }]
       });
-      if (ifUserExist) return res.send(ERRORS.DUPLICATE_USER);
-
-      try {
-        var isReferral = false;
-        var invitedBy = null
-        if (referral) {
-          inviteData = await Invite.findOne({ referral_code: referral, invite_status: INVITE_STATUS.PENDING, is_expired: false })
-
-          if (!inviteData)
-            return res.json({ status: false, message: 'Invalid Or Expired Referral Token' })
-
-          if (Boolean(inviteData.is_used)) {
-            return res.json({ status: false, message: 'Refferal Token Already Used' })
-          }
-
-          if (moment().isAfter(moment(inviteData.createdAt).add(6, 'days'))) {
-            await Invite.findOneAndUpdate({ referral_code: referral }, { is_expired: true }, { upsert: false })
-            return res.json({ status: false, message: 'Refferal token expired, please signup without refferal token !' })
-          }
-
-          invitedBy = inviteData.referred
-          isReferral = true;
-        }
-
-        await checkIfStrongPassword(password);
-        const saltRounds = 10;
-        var salt = await bcrypt.genSalt(saltRounds);
-        var hashPassword = await bcrypt.hash(password, salt);
-        let data = {
-          username,
-          full_name,
-          password: hashPassword,
-          email,
-          referred_by: invitedBy
-        };
-        let newUser = await User.create(data);
-        var user = await User.findOne({ email, status: true }).populate({ path: 'organization', select: '_id name' }).lean().exec();
-
-        let otp_code = referralCodes.generate({
-          length: 6,
-          count: 1,
-          charset: referralCodes.charset(referralCodes.Charset.NUMBERS),
-        })[0];
-
-        await OTP.create({ user_id: newUser._id, otp_code, email })
-        await sendActivationEmail(email, { name: full_name, otp: otp_code }, req.get('origin'))
-
-        if (isReferral) {
-          let invite = await Invite.findOneAndUpdate({ referral_code: referral }, { $set: { invite_status: INVITE_STATUS.ACCEPT, invitee: newUser._id } }, { upsert: false });
-          let data = {
-            org_id: invite.org_id,
-            role_id: invite.role_id,
-            user_id: newUser._id
-          };
-          await Invite.findOneAndUpdate({ referral_code: referral }, { is_used: true }, { upsert: false })
-          await SharedOrganization.create(data);
-          await Organization.findOneAndUpdate({ _id: invite.org_id }, { $set: { user: user._id } }, { upsert: true });
-
-          let shared_organizations = await SharedOrganization.aggregate([
-            {
-              $match: {
-                user_id: user._id,
-                status: true,
-              }
-            },
-            {
-              $lookup: {
-                from: "groups",
-                localField: "org_id",
-                foreignField: "org_id",
-                pipeline: [{
-                  $match: {
-                    parent: null
-                  }
-                }],
-                as: "group"
-              }
-            },
-            { $addFields: { root: { $first: "$group._id" } } },
-            {
-              $lookup: {
-                from: "organizations",
-                localField: "org_id",
-                foreignField: "_id",
-                pipeline: [{
-                  $match: {
-                    status: true
-                  }
-                }],
-                as: "organization"
-              }
-            },
-            { $addFields: { organization: { $first: "$organization" } } },
-            {
-              $lookup: {
-                from: "roles",
-                localField: "role_id",
-                foreignField: "_id",
-                pipeline: [{
-                  $match: {
-                    status: true
-                  }
-                }],
-                as: "role"
-              }
-            },
-            { $addFields: { role: { $first: "$role" } } },
-            { $addFields: { type: 2 } },
-            {
-              $addFields: {
-                "permissions": {
-                  list_group: "$role.list_group",
-                  create_group: "$role.create_group",
-                  edit_group: "$role.edit_group",
-                  delete_group: "$role.delete_group",
-                  list_schedule: "$role.list_schedule",
-                  create_schedule: "$role.create_schedule",
-                  edit_schedule: "$role.edit_schedule",
-                  delete_schedule: "$role.delete_schedule",
-                  list_test: "$role.list_test",
-                  create_test: "$role.create_test",
-                  edit_test: "$role.edit_test",
-                  delete_test: "$role.delete_test",
-                  run_test: "$role.run_test",
-                  list_test_history: "$role.list_test_history",
-                  add_test_group: "$role.add_test_group",
-                  change_test_group: "$role.change_test_group",
-                  test_run_detail: "$role.test_run_detail",
-                  list_rule: "$role.list_rule",
-                  create_rule: "$role.create_rule",
-                  edit_rule: "$role.edit_rule",
-                  delete_rule: "$role.delete_rule",
-                  list_migration: "$role.list_migration",
-                  create_migration: "$role.create_migration",
-                  edit_migration: "$role.edit_migration",
-                  delete_migration: "$role.delete_migration",
-                  execution_migration: "$role.execute_migration",
-                  parse_migration: "$role.parse_migration",
-                  switch_migration: "$role.switch_migration"
-                }
-              }
-            },
-            {
-              $project: {
-                _id: "$organization._id",
-                name: "$organization.name",
-                root: 1,
-                type: 2,
-                permissions: 1
-              }
-            }
-          ]);
-
-          let token = await encrypt(user, { expiresIn: 80000 });
-          delete user.password;
-          delete user.organization;
-          delete user.shared_organization;
-          var response = {
-            ...user,
-            organizations: shared_organizations,
-            accessToken: token
-          };
-
-        } else {
-          let token = await encrypt(user, { expiresIn: 80000 });
-          delete user.password;
-          var response = {
-            ...user,
-            accessToken: token
-          };
-        }
-
-        return res.json({
-          status: true,
-          message: 'Registered Successfully',
-          data: response
-        });
-      } catch (error) {
-        console.log(error)
-        return res.json({ status: false, message: error.message })
-      }
-
-
+  
+      // Fetch created user
+      // const user = await User.findOne({ email, status: true }).populate({ path: 'organization', select: '_id name' }).lean().exec();
+  
+      return res.status(200).json({
+        status: true,
+        message: 'Registered Successfully',
+        data: newUser
+      });
     } catch (error) {
-      console.log(error)
-      return res.json(ERRORS.SOMETHING_WRONG)
+      console.error(error);
+      return res.status(500).json(ERRORS.SOMETHING_WRONG);
     }
   });
+  
 
   module.exports = router;

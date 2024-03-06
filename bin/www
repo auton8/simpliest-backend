@@ -1,0 +1,119 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+var server;
+var app = require('../app');
+var debug = require('debug')('verisys-mob-server:server');
+var http = require('http');
+var https = require('https');
+const fs = require('fs');
+// const WebSocketServer = require('../models/socket');
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || "3008");
+app.set("port", port);
+
+
+/**
+ * Attempt to load SSL certificates.
+ */
+function loadCertificates(certPath, keyPath) {
+  try {
+    return {
+      cert: fs.readFileSync(certPath),
+      key: fs.readFileSync(keyPath)
+    };
+  } catch (e) {
+    console.warn('SSL certificate not found. Falling back to HTTP.');
+    return null;
+  }
+}
+
+/**
+ * Create HTTP server.
+ */
+const ssl = loadCertificates(process.env.SSL_CERT, process.env.SSL_KEY);
+
+if (ssl) {
+  // SSL certificates are available, use HTTPS
+  server = https.createServer(ssl, app);
+} else {
+  // SSL certificates are not available, fallback to HTTP
+  server = http.createServer(app);
+}
+
+// new WebSocketServer(server);
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+server.on("error", onError);
+server.on("listening", onListening);
+
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
